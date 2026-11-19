@@ -777,6 +777,10 @@ final class Combat {
             ecran = (Ecran) lu[0];
             Chiffres.Butin butin = (Chiffres.Butin) lu[1];
             if (lu[2] != null) bouton = (Trouve) lu[2];
+            if (bouton == null && Reparation.reparer(tel, List.of("suivant"), false) != null) {
+                ecran = tel.capture();
+                bouton = Gabarits.localiser(ecran, "suivant");
+            }
             if (butin == null) {
                 log("  butin illisible : j'attaque ce village");
                 return new Object[]{ecran, bouton};
@@ -810,7 +814,7 @@ final class Combat {
         int abandons = 0;
         Vitesse vitesse = new Vitesse(tel);
         Integer degats = null;
-        double change = Tel.maintenant();
+        double change = Tel.maintenant(), rienDepuis = 0;
         int[] vu = null;
         while (Tel.maintenant() < fin) {
             ecran = tel.capture();
@@ -861,11 +865,20 @@ final class Combat {
             vu = null;
             if (complet) {
                 if (Gabarits.localiser(ecran, "combat") != null) return null;
+                boolean popup = false;
                 for (String nom : Gabarits.popups()) {
                     Trouve p = Gabarits.localiser(ecran, nom);
                     if (p != null) {
                         tel.toucher(p.point());
+                        popup = true;
                         break;
+                    }
+                }
+                if (!popup) {
+                    if (rienDepuis == 0) rienDepuis = maintenant;
+                    if (maintenant - rienDepuis >= Reparation.apres) {
+                        Reparation.reparer(tel, List.of("rentrer_village"), true);
+                        rienDepuis = Tel.maintenant() + 20;
                     }
                 }
             }
@@ -956,12 +969,36 @@ final class Combat {
         }
     }
 
+    static final String[] BOUTONS_CONNUS = {"combat", "trouver_partie", "attaquer", "terminer_bataille", "suivant",
+            "rentrer_village", "recherche_rentrer", "nuit/combat", "nuit/trouver", "nuit/rentrer"};
+
+    /** Chemin d'une capture si l'écran ne montre aucun bouton connu, deux fois à 3 s d'écart ;
+     *  null si un bouton connu est là. */
+    static String ecranInconnu(Tel tel) {
+        List<String> noms = new ArrayList<>();
+        for (String n : BOUTONS_CONNUS) if (Gabarits.existe(n)) noms.add(n);
+        noms.addAll(Gabarits.popups());
+        Ecran ecran = null;
+        for (int essai = 0; essai < 2; essai++) {
+            if (essai > 0) tel.dormir(3);
+            try {
+                ecran = tel.capture();
+            } catch (Bloque b) {
+                return null;
+            }
+            for (String n : noms) if (Gabarits.localiser(ecran, n) != null) return null;
+            if (Nuit.lireBarre(ecran).valide()) return null;
+        }
+        String chemin = sauver(ecran.img(), "inconnu");
+        return chemin != null ? chemin : "non enregistrée";
+    }
+
     /** Village principal (false) ou base des ouvriers (true), d'après les boutons à l'écran ;
      *  null si rien de reconnu en `delai` secondes. */
     static Boolean detecterVillage(Tel tel, double delai) {
         String[] principal = {"combat", "trouver_partie", "terminer_bataille", "suivant"};
         String[] ouvriers = {"nuit/combat", "nuit/trouver"};
-        double fin = Tel.maintenant() + delai;
+        double debut = Tel.maintenant(), fin = debut + delai, essaiA = debut + Reparation.apres;
         while (Tel.maintenant() < fin) {
             Ecran e = tel.capture();
             String meilleur = null;
@@ -977,12 +1014,19 @@ final class Combat {
             }
             if (meilleur != null) return meilleur.startsWith("nuit/");
             if (Nuit.lireBarre(e).valide()) return true;
+            boolean popup = false;
             for (String nom : Gabarits.popups()) {
                 Trouve p = Gabarits.localiser(e, nom);
                 if (p != null) {
                     tel.toucher(p.point());
+                    popup = true;
                     break;
                 }
+            }
+            if (!popup && Tel.maintenant() >= essaiA) {
+                Reparation.reparer(tel, List.of("combat", "nuit/combat"), true);
+                essaiA = Tel.maintenant() + 8;
+                fin = Math.max(fin, Math.min(essaiA + 2, debut + delai + 30));
             }
             tel.dormir(0.5);
         }
@@ -999,7 +1043,16 @@ final class Combat {
         if (!manquants.isEmpty()) throw new Fin("Il manque : " + String.join(", ", manquants));
         String capitule = duree > 0 ? ", capitule au bout de " + Math.round(duree) + " s" : "";
         log(nuit ? "Base des ouvriers" + capitule : "Village principal : " + Chiffres.regleButin() + capitule);
+        String version = tel.versionJeu(), verifiee = Reparation.versionVerifiee();
+        Reparation.apres = 10.0;
+        Reparation.reappris.clear();
+        if (version != null && !verifiee.isEmpty() && !version.equals(verifiee)) {
+            log("Clash of Clans a été mis à jour (" + verifiee + " → " + version + ") : si un bouton a changé "
+                    + "d'allure, je le réapprends tout seul.");
+            Reparation.apres = 5.0;
+        }
         int faites = 0, echecs = 0;
+        boolean retourEssaye = false;
         while (maxAttaques == 0 || faites < maxAttaques) {
             try {
                 if (nuit) Nuit.uneAttaque(tel, faites + 1, debug, duree);
@@ -1007,6 +1060,11 @@ final class Combat {
                 faites++;
                 Controle.faite(faites);
                 echecs = 0;
+                retourEssaye = false;
+                if (version != null && !version.equals(verifiee)) {
+                    verifiee = version;
+                    Reparation.noterVersion(version);
+                }
             } catch (Bloque e) {
                 echecs++;
                 Controle.bloque();
@@ -1015,6 +1073,23 @@ final class Combat {
                 if (echecs >= 5) {
                     log("5 blocages d'affilée, j'arrête.");
                     break;
+                }
+                String inconnu = ecranInconnu(tel);
+                if (inconnu != null && !retourEssaye) {
+                    // une fenêtre que le bot ne connaît pas (nouveautés, offre…) : Retour la ferme ;
+                    // au village il ouvre « Quitter ? », que le deuxième Retour referme
+                    retourEssaye = true;
+                    for (int i = 0; i < 2 && inconnu != null; i++) {
+                        log("  écran inconnu : j'essaie la touche Retour");
+                        tel.retour();
+                        tel.dormir(2);
+                        inconnu = ecranInconnu(tel);
+                    }
+                }
+                if (inconnu != null) {
+                    throw new Fin("Écran inconnu : aucun bouton du bot à l'écran (capture : " + inconnu + "), et ni la "
+                            + "touche Retour ni le réapprentissage des boutons n'ont suffi. Si le jeu vient d'être mis à "
+                            + "jour, un bouton a peut-être trop changé. J'arrête sans relancer le jeu.");
                 }
                 if (echecs >= 2) {
                     log("  2 blocages de suite : je remets le jeu au premier plan");
@@ -1025,7 +1100,8 @@ final class Combat {
             }
         }
         if (Config.debug && CaptureService.instance != null) log("  partage d'écran : " + CaptureService.instance.bilan());
-        log("Fin : " + faites + " attaque(s) terminée(s).");
+        log("Fin : " + faites + " attaque(s) terminée(s)."
+                + (Reparation.reappris.isEmpty() ? "" : " Boutons réappris tout seul : " + String.join(", ", Reparation.reappris) + "."));
     }
 
     // ── images de débogage ──

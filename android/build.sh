@@ -27,6 +27,8 @@ mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/assets/templates" "$OUT/lib/
 
 # modèles du bot du PC (templates/), sans les captures de débogage
 cp -r ../templates/. "$OUT/assets/templates/"
+# ce que le bot du PC a réappris tout seul reste sur le PC (le téléphone tient le sien)
+rm -rf "$OUT/assets/templates/anciens" "$OUT/assets/templates/reparations.json"
 (cd "$OUT/assets/templates" && find . -type f -name '*.png' -o -type f -name '*.json' | sort > ../liste.txt)
 cp "$CV"/jni/arm64-v8a/*.so "$OUT/lib/arm64-v8a/"
 

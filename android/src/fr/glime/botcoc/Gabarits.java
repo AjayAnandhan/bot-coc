@@ -61,6 +61,20 @@ final class Gabarits {
         popups = null;
     }
 
+    /** Le fichier de ce bouton vient d'être refait : ce qui en était retenu est oublié. */
+    static synchronized void oublier(String nom) {
+        modeles.remove(nom);
+        absents.remove(nom);
+        echelleConnue.remove(nom);
+        zoneConnue.remove(nom);
+        derniereRecherche.remove(nom);
+        derniereComplete.remove(nom);
+        derniereToutes.remove(nom);
+    }
+
+    /** La prochaine recherche de ce bouton se fera sur tout l'écran, pas seulement à sa place. */
+    static synchronized void partout(String nom) { derniereRecherche.remove(nom); }
+
     private static File fichier(String nom) { return new File(Config.templates(), nom + ".png"); }
 
     private static File memo() { return new File(Config.templates(), "boutons.json"); }
@@ -397,6 +411,36 @@ final class Gabarits {
         return t != null && t.valide && t.score >= seuil(nom) ? t : null;
     }
 
+    /** Ce qu'il y a à la place habituelle d'un bouton, si ça lui ressemble à moitié sans être
+     *  lui : au-dessus du seuil, c'est le même dessin assombri (derrière une fenêtre) ou grisé,
+     *  pas un bouton redessiné. null sinon, ou si sa place n'est pas connue. */
+    static Trouve abime(Ecran ecran, String nom, double plancher) {
+        Modele m = charger(nom);
+        if (m == null) return null;
+        chargerMemo();
+        int[] z;
+        double e0;
+        synchronized (Gabarits.class) {
+            z = zoneConnue.get(nom);
+            if (z == null) return null;
+            e0 = echelleConnue.getOrDefault(nom, 1.0);
+        }
+        int mx = z[2] / 3, my = z[3] / 3;
+        int xa = Math.max(0, z[0] - mx), ya = Math.max(0, z[1] - my);
+        Img fenetre = ecran.gris().crop(xa, ya, z[0] + z[2] + mx, z[1] + z[3] + my);
+        double[] meilleur = null;
+        for (double k : new double[]{1.0, 0.95, 1.05, 0.9, 1.1}) {
+            for (double[] r : comparer(fenetre, m.gris, e0 * k, 1)) {
+                if (meilleur == null || r[0] > meilleur[0]) meilleur = r;
+            }
+        }
+        if (meilleur == null || meilleur[0] < plancher || meilleur[0] >= seuil(nom)) return null;
+        Trouve t = trouve(nom, meilleur[0], meilleur[1] + xa, meilleur[2] + ya, meilleur[3], meilleur[4]);
+        int[] b = t.boite;
+        if (ecran.zone(b[0], b[1], b[0] + b[2], b[1] + b[3]).ecartType() < 0.3 * m.contraste) return null;
+        return t;
+    }
+
     /** Capture en boucle jusqu'à voir l'un des `cibles`. En attendant, touche les popups puis les
      *  boutons `enRoute` (dans cet ordre), une fois l'écran posé (bouton vu deux fois de suite au
      *  même endroit). `patients` : boutons touchés seulement s'ils restent affichés tant de
@@ -408,6 +452,9 @@ final class Gabarits {
         Ecran ecran = null;
         Map<String, int[]> vus = new HashMap<>();
         Map<String, Double> depuis = new HashMap<>();
+        List<String> reparables = new ArrayList<>(Arrays.asList(cibles));
+        if (enRoute != null) reparables.addAll(Arrays.asList(enRoute));
+        double rienDepuis = Tel.maintenant(), temoinA = 0, essaiA = 0;
         while (Tel.maintenant() < fin) {
             ecran = tel.capture();
             for (String nom : cibles) {
@@ -428,6 +475,7 @@ final class Gabarits {
                 }
                 break;
             }
+            boolean connu = !nouveaux.isEmpty();
             vus = nouveaux;
             if (patients != null) {
                 for (Map.Entry<String, Double> p : patients.entrySet()) {
@@ -436,14 +484,30 @@ final class Gabarits {
                     if (t == null) {
                         depuis.remove(nom);
                     } else {
+                        connu = true;
                         depuis.putIfAbsent(nom, Tel.maintenant());
                         if (Tel.maintenant() - depuis.get(nom) >= p.getValue()) {
                             Journal.log("  → " + nom + " (affiché depuis " + Math.round(p.getValue()) + " s)");
                             tel.toucher(t.point());
+                            derniereTouche.put(nom, Tel.maintenant());
                             depuis.remove(nom);
                         }
                     }
                 }
+            }
+            double maintenant = Tel.maintenant();
+            if (connu) {
+                rienDepuis = maintenant;
+            } else if (maintenant - rienDepuis >= 3 && maintenant >= temoinA) {
+                Reparation.reparer(tel, Arrays.asList(cibles), false);
+                temoinA = Tel.maintenant() + 3;
+            }
+            // après un bouton touché, l'écran suivant peut mettre du temps (recherche d'adversaire)
+            double touche = -99;
+            for (double v : derniereTouche.values()) touche = Math.max(touche, v);
+            if (!connu && maintenant - rienDepuis >= Reparation.apres && maintenant >= Math.max(essaiA, touche + 30)) {
+                Reparation.reparer(tel, reparables, true);
+                essaiA = Tel.maintenant() + 20;
             }
             tel.dormir(pas);
         }

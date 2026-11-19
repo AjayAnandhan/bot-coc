@@ -17,6 +17,10 @@ public final class Essai {
         Config.racine = new File(dossier);
         Journal.console = true;
         String mode = a[1];
+        if (mode.equals("reparation")) {
+            reparation(a);
+            return;
+        }
         for (int i = 2; i < a.length; i++) {
             File f = new File(a[i]);
             Img img = Img.lire(f, true);
@@ -25,7 +29,7 @@ public final class Essai {
                 continue;
             }
             System.out.println("== " + f.getName());
-            Ecran e = img.w > 1500 ? new Ecran(img) : new Ecran(img, img.w * 2, img.h * 2);
+            Ecran e = ecran(img);
             if (mode.equals("test")) test(e, f.getName());
             if (mode.equals("chrono")) chrono(e);
             if (mode.equals("attente")) attente(e);
@@ -33,7 +37,50 @@ public final class Essai {
         }
     }
 
+    private static Ecran ecran(Img img) {
+        return img.w > 1500 ? new Ecran(img) : new Ecran(img, img.w * 2, img.h * 2);
+    }
+
     private static double ms(long t0) { return (System.nanoTime() - t0) / 1e6; }
+
+    /** Essai DOSSIER reparation BOUTON AVANT APRES : rejoue le réapprentissage d'un bouton
+     *  redessiné. AVANT = l'écran où il n'est plus reconnu, APRES = l'écran qu'il ouvre une fois
+     *  touché. DOSSIER/templates doit contenir l'ancien modèle et un boutons.json avec sa place. */
+    private static void reparation(String[] a) {
+        String bouton = a[2];
+        Img avant = Img.lire(new File(a[3]), true), apres = Img.lire(new File(a[4]), true);
+        if (avant == null || apres == null) {
+            System.out.println("Images illisibles");
+            return;
+        }
+        Tel faux = new Tel() {
+            private boolean touche = false;
+
+            @Override
+            Ecran capture() { return ecran(touche ? apres : avant); }
+
+            @Override
+            void toucher(int[]... points) {
+                touche = true;
+                System.out.println("touché en " + points[0][0] + ", " + points[0][1]);
+            }
+
+            @Override
+            void glisser(double x1, double y1, double x2, double y2, long ms, long tenirMs) {}
+
+            @Override
+            boolean pincer(boolean dezoom) { return true; }
+
+            @Override
+            int[] taille() { return new int[]{avant.w, avant.h}; }
+        };
+        Trouve t = Gabarits.chercher(faux.capture(), bouton);
+        System.out.println(String.format(Locale.US, "avant : %s score %.2f", bouton, t == null ? -1 : t.score));
+        System.out.println("réappris : " + Reparation.reparer(faux, List.of(bouton), true));
+        Gabarits.partout(bouton);
+        t = Gabarits.chercher(ecran(avant), bouton);
+        System.out.println(String.format(Locale.US, "après : %s score %.2f", bouton, t == null ? -1 : t.score));
+    }
 
     private static void chrono(Ecran ecran) {
         long t0 = System.nanoTime();

@@ -999,6 +999,7 @@ final class Nuit {
         List<String> noms = new ArrayList<>(Gabarits.popups());
         noms.addAll(List.of("nuit/trouver", "nuit/trouver_partie", "trouver_partie", "nuit/attaquer", "nuit/combat"));
         Map<String, int[]> vus = new LinkedHashMap<>();
+        double rienDepuis = Tel.maintenant();
         while (Tel.maintenant() < fin) {
             ecran = tel.capture();
             Barre barre = lireBarre(ecran);
@@ -1017,6 +1018,12 @@ final class Nuit {
                 break;
             }
             vus = nouveaux;
+            if (!nouveaux.isEmpty()) {
+                rienDepuis = Tel.maintenant() + 30;      // la recherche d'adversaire n'affiche aucun bouton connu
+            } else if (Tel.maintenant() - rienDepuis >= Reparation.apres) {
+                Reparation.reparer(tel, List.of("nuit/combat", "nuit/trouver"), true);
+                rienDepuis = Tel.maintenant() + 20;
+            }
             tel.dormir(0.3);
         }
         throw new Bloque("le combat n'a pas commencé", ecran);

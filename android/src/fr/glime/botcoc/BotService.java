@@ -2,7 +2,11 @@ package fr.glime.botcoc;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.graphics.Path;
 import android.media.AudioManager;
 import android.os.Handler;
@@ -33,6 +37,20 @@ public final class BotService extends AccessibilityService {
     private Overlay overlay;
     private volatile String premierPlan = "";
     private volatile long verifie = 0;
+    private volatile Boolean annonce = null;
+    private final Runnable relire = () -> {
+        verifie = 0;
+        premierPlan();
+    };
+    /** Écran rallumé, téléphone déverrouillé : le jeu revient souvent sans aucun événement. */
+    private final BroadcastReceiver ecran = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            principal.removeCallbacks(relire);
+            principal.postDelayed(relire, 400);
+            principal.postDelayed(relire, 1500);
+        }
+    };
     private boolean volumeTenu = false, volumeLong = false;
     private final Runnable arretVolume = () -> {
         volumeLong = true;
@@ -55,6 +73,10 @@ public final class BotService extends AccessibilityService {
         instance = this;
         Config.racine = getExternalFilesDir(null);
         Fichiers.installer(this);
+        Son.reprendre(this);
+        IntentFilter f = new IntentFilter(Intent.ACTION_USER_PRESENT);
+        f.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(ecran, f, Context.RECEIVER_NOT_EXPORTED);
     }
 
     @Override
@@ -64,7 +86,19 @@ public final class BotService extends AccessibilityService {
         if (p.equals(getPackageName())) return;
         premierPlan = p;
         verifie = System.currentTimeMillis();
-        if (overlay != null) overlay.jeuAuPremierPlan(p.equals(Config.JEU));
+        principal.removeCallbacks(relire);
+        if (p.equals(Config.JEU)) annoncer(true);
+        // bandeau de notification, volet, verrouillage… : la fenêtre active n'a pas forcément
+        // changé, on la relit un peu après au lieu de croire le jeu caché
+        else principal.postDelayed(relire, 400);
+    }
+
+    /** Prévient la pastille quand le jeu apparaît ou disparaît. */
+    private void annoncer(boolean jeu) {
+        Overlay o = overlay;
+        if (o == null || Boolean.valueOf(jeu).equals(annonce)) return;
+        annonce = jeu;
+        o.jeuAuPremierPlan(jeu);
     }
 
     @Override
@@ -74,6 +108,12 @@ public final class BotService extends AccessibilityService {
     public boolean onUnbind(Intent intent) {
         instance = null;
         Controle.arreter();
+        Son.couper(this, false);
+        try {
+            unregisterReceiver(ecran);
+        } catch (RuntimeException ignored) {
+        }
+        principal.removeCallbacks(relire);
         if (overlay != null) overlay.retirer();
         overlay = null;
         if (filGestes != null) filGestes.quitSafely();
@@ -97,6 +137,7 @@ public final class BotService extends AccessibilityService {
                 }
             } catch (RuntimeException ignored) {
             }
+            annoncer(Config.JEU.equals(premierPlan));
         }
         return premierPlan;
     }
@@ -257,6 +298,16 @@ public final class BotService extends AccessibilityService {
     }
 
     void accueil() { performGlobalAction(GLOBAL_ACTION_HOME); }
+
+    void retour() { performGlobalAction(GLOBAL_ACTION_BACK); }
+
+    String versionJeu() {
+        try {
+            return getPackageManager().getPackageInfo(Config.JEU, 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return null;
+        }
+    }
 
     /** Plus de jeu ni de bot depuis 2 min : le service se coupe lui-même (rien ne reste allumé ;
      *  il sera rallumé au prochain lancement). */

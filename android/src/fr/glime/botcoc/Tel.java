@@ -26,6 +26,12 @@ abstract class Tel {
     /** Le jeu ne répond plus : on le remet au premier plan. */
     boolean relancerJeu() { return false; }
 
+    /** La touche Retour d'Android : ferme la fenêtre ouverte dans le jeu. */
+    void retour() {}
+
+    /** Version installée de Clash of Clans (null : inconnue). */
+    String versionJeu() { return null; }
+
     /** Pause qui s'interrompt si l'arrêt est demandé. */
     void dormir(double secondes) {
         Controle.verifier();

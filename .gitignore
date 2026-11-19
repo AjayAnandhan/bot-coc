@@ -5,3 +5,7 @@ debug/
 templates/boutons.json
 appli/target/
 appli/.qmlls.ini
+templates/reparations.json
+templates/anciens/
+resolution_a_remettre.txt
+son_a_remettre.txt

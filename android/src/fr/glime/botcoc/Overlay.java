@@ -363,6 +363,7 @@ final class Overlay {
                 lpPastille.screenBrightness = lumiere;
                 if (pastilleAffichee) wm.updateViewLayout(pastille, lpPastille);
             }
+            Son.couper(service, Controle.enMarche() && jeuVisible);
         } catch (RuntimeException ignored) {
         }
     }

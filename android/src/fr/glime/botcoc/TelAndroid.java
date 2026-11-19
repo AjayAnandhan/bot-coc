@@ -89,6 +89,15 @@ final class TelAndroid extends Tel {
     int[] taille() { return new int[]{w, h}; }
 
     @Override
+    void retour() {
+        attendreJeu();
+        service().retour();
+    }
+
+    @Override
+    String versionJeu() { return service().versionJeu(); }
+
+    @Override
     boolean relancerJeu() {
         BotService s = service();
         s.accueil();

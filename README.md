@@ -21,6 +21,8 @@
 - **Spells**: cast once every troop is out, during the battle, on the troop groups that move the most (three video frames 0.12 s apart, compared at quarter resolution): half from the bottom view, the rest from the top view. Every bar card is checked so a spell is never dropped as a troop.
 - **End of battle**: the bot surrenders when "Overall damage" hasn't changed for 6 s (`--fige`, and at least 20 s after deployment started), or once the `--duree` time is up, instead of waiting for the timer. From 46 % with no star yet, it gives the attack more time (doubled delay, duration + 15 s) to reach the star and the victory bonus: stars are read in the bottom-right corner of the screen.
 - **Surprise pop-ups**: buttons in `templates/popups/` (OK, close…) are tapped when an unexpected window shows up. The "Rentrer" button of the opponent search screen is not one of them (it cancelled every search): it is only tapped after the screen has been frozen for 25 s.
+- **Game updates**: when nothing is recognised any more, the bot looks at what sits where each button usually is. If it still looks half like the button, it taps it, and if the expected screen opens, it remakes the button's image by itself (the old one is kept in `templates/anciens/`). On an unknown screen it tries the Back key twice, then stops with a clear message instead of restarting the game in a loop.
+- **Sound and frame rate**: only Clash of Clans is muted while the bot runs (`appops PLAY_AUDIO`), and sound comes back at the end. The game's 30 fps cap is set again at each start if it was lost.
 - **Light on the PC**: video is decoded at 10 fps (about 5 % of one core while waiting), and the bot runs on the efficiency cores of a hybrid Intel CPU (found automatically, `COEURS` setting at the top of the script), never on the first core. The adb server is moved to the same cores.
 - **USB or Wi-Fi**: the bot uses the phone plugged in over USB, otherwise the one connected over Wi-Fi (`adb connect`), with a lighter video stream (4 Mbit/s). If the Wi-Fi link drops, it reconnects with an `adb-a54` script when one is installed.
 - **Auto mode** (`--auto`): at startup it looks at the screen and picks the home village or the Builder Base by itself. If Clash of Clans isn't in the foreground, it launches it.
@@ -79,6 +81,7 @@ The same bot, rewritten in Java, running **on the phone itself**: no PC and no a
 - **Fingers**: an accessibility service (batched taps, swipes, two-finger pinch). The bot only ever touches Clash of Clans: if another app, the notification shade or the lock screen comes up, it pauses.
 - **Floating pill** over the game, top center: current attack and state. Tap it for a panel with Start / Stop, the counters and the last log lines. It also stops from the notification or with a long press on volume down.
 - **Battery**: screen at minimum brightness while the bot plays, screen sharing paused as soon as it stops, accessibility service turned off 2 min after leaving the game and back on at the next start.
+- **Sound**: media volume muted while the bot plays, restored as soon as it stops or pauses. Like the PC bot, the app remakes by itself the image of a button redrawn by a game update.
 - **Settings**: the same as the KDE app, in the "Bot CoC" app. Home village and Builder Base, like the PC bot.
 
 ```bash

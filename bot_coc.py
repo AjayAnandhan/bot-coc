@@ -179,6 +179,11 @@ JEU = "com.supercell.clashofclans"
 RESOLUTION_BOT = 0.5         # None : le bot ne touche jamais à la résolution du jeu
 REMETTRE_A_LA_FIN = False    # True : à l'arrêt, remet la résolution d'avant (le jeu redémarre)
 MEMO_RESOLUTION = DOSSIER / "resolution_a_remettre.txt"   # présent = le bot doit remettre 100 %
+IPS_JEU = 30                 # images/s imposées au jeu, pour toi aussi (None : pas de limite)
+# Son du jeu coupé pendant le bot (seulement Clash of Clans : ta musique continue), remis à
+# l'arrêt. Après un arrêt brutal, MEMO_SON reste et le lancement suivant le remettra.
+COUPER_SON = True
+MEMO_SON = DOSSIER / "son_a_remettre.txt"
 
 # Caméra : au début de chaque attaque, dézoom au maximum (pincement à deux doigts), puis
 # vue « haut » (caméra en butée en haut à gauche) et vue « bas » (en butée en bas à droite).
@@ -648,12 +653,14 @@ def est_sans_fil(serie):
 
 
 def appareils():
-    """[(numéro, en Wi-Fi ?)] des téléphones prêts (état « device »)."""
+    """[(numéro, en Wi-Fi ?)] des téléphones prêts (état « device »). Waydroid et les émulateurs
+    du PC répondent aussi à adb : ce ne sont pas des téléphones."""
     try:
-        sortie = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=20).stdout
+        sortie = subprocess.run(["adb", "devices", "-l"], capture_output=True, text=True, timeout=20).stdout
     except subprocess.TimeoutExpired:
         return []
-    champs = (ligne.split() for ligne in sortie.splitlines()[1:])
+    champs = (ligne.split() for ligne in sortie.splitlines()[1:]
+              if not re.search(r"waydroid|emulator|sdk_gphone", ligne, re.I))
     return [(c[0], est_sans_fil(c[0])) for c in champs if len(c) >= 2 and c[1] == "device"]
 
 
@@ -708,6 +715,7 @@ class Telephone:
         self.canal_essaye = False
         self.dezoom_verifie = False   # True dès qu'un pincement a fait bouger l'image
         self.remettre_resolution = False   # True : à l'arrêt, remettre le jeu en 100 %
+        self.son_coupe = False
         self.ancien_reglage = None
         if GARDER_ECRAN_ALLUME:
             valeur = self.shell("settings get global stay_on_while_plugged_in").strip()
@@ -939,12 +947,78 @@ class Telephone:
 
     # ── Résolution du jeu (50 % pendant le bot, 100 % pour toi) ──
 
+    def jeu_devant(self):
+        # un écran par partage d'écran (scrcpy, Bot CoC, enregistrement…) : le jeu n'a le
+        # focus que sur l'un d'eux, pas forcément le premier de la liste
+        return JEU in self.shell("dumpsys window displays 2>/dev/null | grep mCurrentFocus")
+
+    def version_jeu(self):
+        m = re.search(r"versionName=(\S+)", self.shell(f"dumpsys package {JEU} | grep -m1 versionName"))
+        return m.group(1) if m else None
+
+    def reglage_jeu(self):
+        """(échelle, images/s) qu'Android impose au jeu dans son mode actuel ; (None, None) si
+        illisible. i/s None = pas de limite."""
+        modes = re.search(r"current mode: (\w+)", self.shell(f"cmd game list-modes {JEU}"))
+        numero = {"standard": 1, "performance": 2, "battery": 3, "custom": 4}.get(modes and modes.group(1))
+        if numero is None:
+            return None, None
+        c = re.search(rf"\b{numero}=\[Game Mode:{numero},Scaling:([\d.]+)[^\]]*?Fps:(\d*)",
+                      self.shell(f"cmd game list-configs {JEU}"))
+        if not c:
+            return None, None
+        return float(c.group(1)), int(c.group(2)) if c.group(2) else None
+
+    def limiter_ips(self):
+        """Le Game Booster remet le mode « battery » (3) à chaque ouverture du jeu, la limite est
+        donc posée sur ce mode, et sur le mode actuel s'il est autre. Elle saute parfois (ancien
+        `cmd game set` sans --fps, mise à jour) : reposée à chaque lancement du bot."""
+        if not IPS_JEU:
+            return
+        echelle, ips = self.reglage_jeu()
+        if ips == IPS_JEU:
+            return
+        mode = re.search(r"current mode: (\w+)", self.shell(f"cmd game list-modes {JEU}"))
+        echelle = echelle or RESOLUTION_BOT
+        taille = f" --downscale {echelle:g}" if echelle else ""
+        self.shell(f"cmd game set --mode 3{taille} --fps {IPS_JEU} {JEU}")
+        if mode and mode.group(1) != "battery":
+            self.shell(f"cmd game set{taille} --fps {IPS_JEU} {JEU}")
+        if self.reglage_jeu()[1] == IPS_JEU:
+            log(f"Limite de {IPS_JEU} images/s du jeu reposée (elle avait sauté)")
+        else:
+            log(f"  le téléphone refuse la limite de {IPS_JEU} images/s du jeu")
+
+    def couper_son(self):
+        """appops PLAY_AUDIO : Android rend muet ce que joue Clash of Clans, rien d'autre."""
+        if not COUPER_SON:
+            return
+        avant = re.search(r"PLAY_AUDIO: (\w+)", self.shell(f"appops get {JEU} PLAY_AUDIO"))
+        avant = avant.group(1) if avant else "default"
+        if avant == "ignore" and not MEMO_SON.exists():
+            return                  # déjà muet sans le bot : on n'y touche pas
+        if not MEMO_SON.exists():
+            MEMO_SON.write_text(f"{avant}\n")
+        self.shell(f"appops set {JEU} PLAY_AUDIO ignore")
+        self.son_coupe = True
+
+    def remettre_son(self):
+        if not (self.son_coupe or MEMO_SON.exists()):
+            return
+        try:
+            avant = MEMO_SON.read_text().strip() if MEMO_SON.exists() else "default"
+        except OSError:
+            avant = "default"
+        self.shell(f"appops set {JEU} PLAY_AUDIO {avant if avant in ('allow', 'default') else 'default'}")
+        MEMO_SON.unlink(missing_ok=True)
+        self.son_coupe = False
+
     def echelle_jeu(self):
         """Résolution à laquelle le jeu dessine vraiment (0.5 = 50 %), d'après la taille de son
         image dans le téléphone. None si le jeu n'est pas affiché."""
-        sortie = self.shell(f"dumpsys window 2>/dev/null | grep -m1 mCurrentFocus; dumpsys SurfaceFlinger "
-                            f"| grep 'SurfaceView.{JEU}' | grep -o 'w/h:[0-9]*x[0-9]*'")
-        if JEU not in sortie.split("\n", 1)[0]:
+        sortie = self.shell(f"dumpsys window displays 2>/dev/null | grep mCurrentFocus | grep -c {JEU}; "
+                            f"dumpsys SurfaceFlinger | grep 'SurfaceView.{JEU}' | grep -o 'w/h:[0-9]*x[0-9]*'")
+        if sortie.split("\n", 1)[0].strip() in ("", "0"):
             return None             # caché derrière l'accueil : sa surface reste dans SurfaceFlinger
         tailles = re.findall(r"w/h:(\d+)x(\d+)", sortie)
         ecran = re.findall(r"(\d+)x(\d+)", self.shell("wm size"))
@@ -969,17 +1043,24 @@ class Telephone:
             self.shell(f"cmd game reset {JEU}")              # réglage normal du téléphone
             accepte = "current mode: custom" not in self.shell(f"cmd game list-modes {JEU}")
         else:
+            reglee, ips = self.reglage_jeu()
+            ips = IPS_JEU or ips
+            accepte = reglee is not None and abs(reglee - echelle) < 0.01
             # deux fois : venant du mode « standard », Android passe en mode « custom » au 1er
-            # appel sans appliquer la résolution ; le 2e l'applique.
-            for _ in range(2):
+            # appel sans appliquer la résolution ; le 2e l'applique. Sans --fps, Android
+            # effacerait la limite d'images/s posée à côté.
+            limite = f" --fps {ips}" if ips else ""
+            for _ in range(0 if accepte else 2):
                 accepte = f"downscaling-ratio: {echelle:g}" in self.shell(
-                    f"cmd game set --downscale {echelle:g} {JEU}")
+                    f"cmd game set --downscale {echelle:g}{limite} {JEU}")
         if not accepte:
             return False, False
-        for _ in range(3):              # le réglage met un instant à s'appliquer : on relance
+        for _ in range(2):              # le réglage met un instant à s'appliquer : on relance
             time.sleep(2)               # le jeu jusqu'à ce qu'il dessine à la bonne résolution
-            if self.relancer_jeu(echelle, delai=20):
+            if self.relancer_jeu(echelle, delai=30):
                 return True, True
+            if not self.jeu_devant():
+                break                   # verrouillé ou autre appli devant : relancer ne sert à rien
         return True, False
 
     def relancer_jeu(self, echelle=None, delai=30):
@@ -997,13 +1078,14 @@ class Telephone:
 
     def resolution_du_bot(self):
         """Au lancement du bot : met le jeu en 50 % s'il n'y est pas déjà."""
+        self.limiter_ips()
         if RESOLUTION_BOT is None:
             return
         e = self.echelle_jeu()
         if e is None:
             log("Clash of Clans n'est pas affiché : je le lance")
             self.shell(f"monkey -p {JEU} -c android.intent.category.LAUNCHER 1")
-            for _ in range(30):
+            for _ in range(60):
                 time.sleep(1)
                 e = self.echelle_jeu()
                 if e is not None:
@@ -1012,6 +1094,20 @@ class Telephone:
             self.remettre_resolution = REMETTRE_A_LA_FIN    # laissé en 50 % par un arrêt brutal
         if e is not None and abs(e - RESOLUTION_BOT) < 0.05:
             return                                          # déjà bon : rien à redémarrer
+        if e is None:
+            # le jeu n'a pas encore dessiné son village : le redémarrer ne changerait rien
+            if not self.jeu_devant():
+                log("Clash of Clans ne vient pas au premier plan : déverrouille le téléphone "
+                    "(ou ferme l'appli qui est devant), puis relance le bot.")
+            else:
+                try:
+                    chemin = sauver(self.capture().img, "inconnu")
+                except Bloque:
+                    chemin = None
+                log("Clash of Clans est ouvert mais n'affiche pas son village depuis 1 min "
+                    "(chargement, téléchargement après une mise à jour, nouvelle fenêtre ?)"
+                    + (f" : capture {chemin}" if chemin else "") + ". Je m'arrête sans relancer le jeu.")
+            sys.exit(1)
         log(f"Jeu affiché en {e:.0%} : je le passe en {RESOLUTION_BOT:.0%} le temps du bot "
             f"(il redémarre, ~15 s)" if e else f"Je passe le jeu en {RESOLUTION_BOT:.0%} (il redémarre)")
         MEMO_RESOLUTION.write_text(f"{JEU} : remettre la résolution normale (cmd game reset)\n")
@@ -1038,6 +1134,10 @@ class Telephone:
         if self.canal is not None:
             self.canal.fermer()
             self.canal = None
+        try:
+            self.remettre_son()
+        except Bloque:
+            log("  ADB ne répond plus : le son du jeu reste coupé jusqu'au prochain lancement du bot")
         if self.connecte_par_moi:
             subprocess.run(["adb", "disconnect", self.serie], capture_output=True, timeout=20)
         if self.remettre_resolution and MEMO_RESOLUTION.exists():
@@ -1372,6 +1472,7 @@ def attendre(tel, cibles, delai, en_route=(), pas=0.2, patients=None):
     noms = [*cibles, *en_route, *popups()]
     vus = {}                    # boutons vus au tour précédent (pour ne pas toucher pendant une animation)
     depuis = {}                 # boutons « patients » : affichés sans interruption depuis quand
+    rien_depuis, temoin_a, essai_a = time.monotonic(), 0.0, 0.0
     while time.monotonic() < fin:
         lignes = [lignes_de(n) for n in noms]
         if tour % 5 and all(lignes):
@@ -1397,14 +1498,29 @@ def attendre(tel, cibles, delai, en_route=(), pas=0.2, patients=None):
                 derniere_touche[nom] = time.monotonic()
             break
         vus = nouveaux
+        connu = bool(nouveaux)
         for nom, duree in (patients or {}).items():
             t = localiser(ecran, nom)
             if not t:
                 depuis.pop(nom, None)
-            elif time.monotonic() - depuis.setdefault(nom, time.monotonic()) >= duree:
+                continue
+            connu = True
+            if time.monotonic() - depuis.setdefault(nom, time.monotonic()) >= duree:
                 log(f"  → {nom} (affiché depuis {duree:g} s)")
                 tel.toucher((t.x, t.y))
+                derniere_touche[nom] = time.monotonic()
                 depuis.pop(nom)
+        maintenant = time.monotonic()
+        if connu:
+            rien_depuis = maintenant
+        elif maintenant - rien_depuis >= 3 and maintenant >= temoin_a:
+            reparer(tel, cibles, toucher=False)
+            temoin_a = time.monotonic() + 3
+        # après un bouton touché, l'écran suivant peut mettre du temps (recherche d'adversaire)
+        touche = max(derniere_touche.values(), default=-99.0)
+        if not connu and maintenant - rien_depuis >= REPARER_APRES and maintenant >= max(essai_a, touche + 30):
+            reparer(tel, [*cibles, *en_route])
+            essai_a = time.monotonic() + 20
         time.sleep(pas)
     raise Bloque(f"« {' / '.join(cibles)} » n'est pas apparu en {delai} s", ecran)
 
@@ -2725,6 +2841,9 @@ def choisir_village(tel, ecran):
     for sautes in range(SUIVANTS_MAX + 1):
         ecran, butin, vu = lire_village(tel, ecran)
         bouton = vu or bouton
+        if bouton is None and reparer(tel, ["suivant"], toucher=False):
+            ecran = tel.capture()
+            bouton = localiser(ecran, "suivant")
         if butin is None:
             log("  butin illisible : j'attaque ce village")
             return ecran, bouton
@@ -2752,6 +2871,7 @@ def attendre_fin(tel, boite, delai=300, duree=None, debut=None):
     ecran, essais, abandon = None, 0, False
     vitesse = Vitesse(tel)
     degats, change, vu, prolonge = None, time.monotonic(), None, False
+    rien_depuis = None
     while time.monotonic() < fin:
         ecran = tel.capture_bande(*bande_rouge(boite))
         maintenant = time.monotonic()
@@ -2802,6 +2922,11 @@ def attendre_fin(tel, boite, delai=300, duree=None, debut=None):
                 if p:
                     tel.toucher((p.x, p.y))
                     break
+            else:
+                rien_depuis = rien_depuis or maintenant
+                if maintenant - rien_depuis >= REPARER_APRES:
+                    reparer(tel, ["rentrer_village"])
+                    rien_depuis = time.monotonic() + 20
         time.sleep(0.2)
     raise Bloque(f"pas d'écran de fin après {delai} s", ecran)
 
@@ -2884,12 +3009,187 @@ def recuperer(tel, nuit=False):
         pass
 
 
+BOUTONS_CONNUS = ("combat", "trouver_partie", "attaquer", "terminer_bataille", "suivant", "rentrer_village",
+                  "recherche_rentrer", "nuit/combat", "nuit/trouver", "nuit/rentrer")
+
+
+def ecran_inconnu(tel):
+    """Chemin d'une capture si l'écran ne montre aucun bouton connu, deux fois à 3 s d'écart
+    (pas une simple animation) ; None si un bouton connu est là."""
+    noms = [n for n in BOUTONS_CONNUS if template(n) is not None] + popups()
+    for essai in range(2):
+        if essai:
+            time.sleep(3)
+        try:
+            ecran = tel.capture()
+        except Bloque:
+            return None
+        if any(localiser(ecran, n) for n in noms) or lire_barre_nuit(ecran).valide:
+            return None
+    return sauver(ecran.img, "inconnu")
+
+
+# Après une mise à jour du jeu, un bouton redessiné reste presque toujours à la même place.
+# Quand plus rien n'est reconnu, le bot regarde donc ce qu'il y a à la place habituelle de
+# ses boutons : si ça ressemble encore à moitié à l'un d'eux, il le touche, et si l'écran
+# que ce bouton ouvre d'habitude arrive, il refait son image tout seul.
+PLANCHER_REPARATION = 0.5
+REPARER_APRES = 10.0         # s sans rien reconnaître avant d'essayer
+SUITES = {"combat": ("trouver_partie", "attaquer", "terminer_bataille", "recherche_rentrer"),
+          "trouver_partie": ("attaquer", "terminer_bataille", "recherche_rentrer"),
+          "attaquer": ("terminer_bataille", "recherche_rentrer"),
+          "rentrer_village": ("combat",),
+          "nuit/combat": ("nuit/trouver",),
+          "nuit/trouver": ("barre",),
+          "nuit/rentrer": ("nuit/combat",)}
+# boutons qu'on ne touche pas pour les vérifier : refaits quand leur voisin habituel est là
+TEMOINS = {"terminer_bataille": "suivant", "suivant": "terminer_bataille"}
+REPARATIONS = TEMPLATES / "reparations.json"
+_essais_reparation = {}
+reappris = []
+
+
+def lire_reparations():
+    try:
+        return json.loads(REPARATIONS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def noter_reparations(**champs):
+    d = lire_reparations()
+    for cle, valeur in champs.items():
+        if isinstance(valeur, dict):
+            d.setdefault(cle, {}).update(valeur)
+        else:
+            d[cle] = valeur
+    try:
+        REPARATIONS.write_text(json.dumps(d, indent=1, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def abime(ecran, nom):
+    """Ce qu'il y a à la place habituelle d'un bouton, si ça lui ressemble à moitié sans être
+    lui : au-dessus du seuil, c'est le même dessin assombri (derrière une fenêtre) ou grisé,
+    pas un bouton redessiné. None sinon, ou si sa place n'est pas connue."""
+    if _charger(nom) is None or nom not in _zone_connue:
+        return None
+    tpl, _, contraste = _charger(nom)
+    x, y, tw, th = _zone_connue[nom]
+    mx, my = tw // 3, th // 3
+    xa, ya = max(0, x - mx), max(0, y - my)
+    fenetre = ecran.gris[ya:y + th + my, xa:x + tw + mx]
+    e0 = _echelle_connue.get(nom, 1.0)
+    essais = [r for k in (1.0, 0.95, 1.05, 0.9, 1.1) for r in _comparer(fenetre, tpl, e0 * k)]
+    if not essais:
+        return None
+    score, bx, by, bw, bh, _ = max(essais)
+    t = _trouve(nom, score, bx + xa, by + ya, bw, bh)
+    x, y, w, h = t.boite
+    if not PLANCHER_REPARATION <= score < seuil_de(nom):
+        return None
+    if float(ecran.img[y:y + h, x:x + w].std()) < 0.3 * contraste:
+        return None
+    return t
+
+
+def _fige(avant, apres, boite):
+    x, y, w, h = (int(v * REDUCTION) for v in boite)
+    a, b = avant.gris[y:y + h, x:x + w], apres.gris[y:y + h, x:x + w]
+    return a.size > 0 and a.shape == b.shape and float(cv2.absdiff(a, b).mean()) < 6
+
+
+def apprendre_bouton(c, ecran, preuve):
+    """Refait l'image d'un bouton d'après l'écran ; l'ancienne est gardée dans templates/anciens/."""
+    x, y, w, h = c.boite
+    chemin = TEMPLATES / f"{c.nom}.png"
+    ancien = TEMPLATES / "anciens" / f"{c.nom}.png"
+    ancien.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(chemin, ancien)
+    cv2.imwrite(str(chemin), ecran.img[y:y + h, x:x + w])
+    for memo in (_templates, _echelle_connue, _zone_connue, _derniere_recherche, _derniere_complete):
+        memo.pop(c.nom, None)
+    _essais_reparation.pop(c.nom, None)
+    reappris.append(c.nom)
+    noter_reparations(boutons={c.nom: {"date": time.strftime("%Y-%m-%d %H:%M"),
+                                       "ressemblance": round(c.score, 2), "preuve": preuve}})
+    log(f"  bouton « {c.nom} » réappris tout seul : il ne ressemblait plus qu'à {c.score:.0%} à son "
+        f"image ({preuve})")
+
+
+def reparer(tel, noms, toucher=True):
+    """Cherche parmi `noms` un bouton qui a changé d'allure sans changer de place et refait son
+    image, une fois sûr que c'est bien lui : l'écran qu'il ouvre arrive après l'avoir touché
+    (SUITES), ou son voisin habituel est à l'écran (TEMOINS). Ne touche rien tant qu'un bouton
+    connu est affiché, ni si `toucher` est faux. Renvoie le nom du bouton réappris, sinon None."""
+    connus = [n for n in BOUTONS_CONNUS if template(n) is not None] + popups()
+    if not toucher:
+        connus = [TEMOINS[n] for n in noms if n in TEMOINS]
+        if not connus:
+            return None
+    try:
+        ecran = tel.capture()
+    except Bloque:
+        return None
+    for n in connus:
+        _derniere_recherche.pop(n, None)          # tout l'écran, pas seulement leur place habituelle
+    presents = [n for n in connus if localiser(ecran, n)]
+    if not toucher and not presents:
+        return None
+    if isinstance(tel, Telephone) and not tel.jeu_devant():
+        return None
+    candidats = []
+    for nom in noms:
+        if nom in presents or _essais_reparation.get(nom, 0) >= 3:
+            continue
+        c = abime(ecran, nom)
+        if not c:
+            continue
+        if TEMOINS.get(nom) in presents:
+            time.sleep(0.5)
+            if _fige(ecran, tel.capture(), c.boite):
+                apprendre_bouton(c, ecran, f"« {TEMOINS[nom]} » est bien à l'écran")
+                return nom
+        elif toucher and nom in SUITES and not presents:
+            candidats.append(c)
+    if not candidats:
+        return None
+    c = max(candidats, key=lambda t: t.score)
+    time.sleep(0.5)
+    if not _fige(ecran, tel.capture(), c.boite):
+        return None                               # une animation, pas un bouton
+    _essais_reparation[c.nom] = _essais_reparation.get(c.nom, 0) + 1
+    log(f"  rien de connu à l'écran, mais ce qui est à la place de « {c.nom} » lui ressemble à "
+        f"{c.score:.0%} : je le touche pour voir")
+    tel.toucher((c.x, c.y))
+    debut = time.monotonic()
+    while time.monotonic() - debut < 25:
+        time.sleep(0.4)
+        try:
+            e = tel.capture()
+        except Bloque:
+            return None
+        _derniere_recherche.pop(c.nom, None)
+        if localiser(e, c.nom):
+            return None                           # il est reconnu maintenant : il était juste caché
+        for n in SUITES[c.nom]:
+            if lire_barre_nuit(e).valide if n == "barre" else localiser(e, n):
+                apprendre_bouton(c, ecran, f"le toucher a bien ouvert « {n} »")
+                return c.nom
+        if time.monotonic() - debut > 6 and _fige(ecran, e, c.boite):
+            break                                 # toujours là : le toucher n'a rien fait
+    log(f"  l'écran attendu n'est pas venu : je garde l'ancienne image de « {c.nom} »")
+    return None
+
+
 def detecter_village(tel, delai=30):
     """--auto : village principal (False) ou base des ouvriers (True), d'après les boutons à
     l'écran au lancement ; None si rien de reconnu en `delai` secondes."""
     principal = ("combat", "trouver_partie", "terminer_bataille", "suivant")
     ouvriers = ("nuit/combat", "nuit/trouver")
-    fin = time.monotonic() + delai
+    debut = time.monotonic()
+    fin, essai_a = debut + delai, debut + REPARER_APRES
     while time.monotonic() < fin:
         e = tel.capture()
         scores = {}
@@ -2906,6 +3206,11 @@ def detecter_village(tel, delai=30):
             if p:
                 tel.toucher((p.x, p.y))
                 break
+        else:
+            if time.monotonic() >= essai_a:
+                reparer(tel, ["combat", "nuit/combat"])
+                essai_a = time.monotonic() + 8
+                fin = max(fin, min(essai_a + 2, debut + delai + 30))
         time.sleep(0.5)
     return None
 
@@ -2924,7 +3229,15 @@ def boucle(tel, max_attaques, debug, nuit=False, duree=None):
         log("Base des ouvriers" + (f", capitule au bout de {duree:g} s" if duree else ""))
     else:
         log(f"Village principal : {regle_butin()}" + (f", capitule au bout de {duree:g} s" if duree else ""))
+    global REPARER_APRES
+    version = tel.version_jeu() if isinstance(tel, Telephone) else None
+    verifiee = lire_reparations().get("jeu")
+    if version and verifiee and version != verifiee:
+        log(f"Clash of Clans a été mis à jour ({verifiee} → {version}) : si un bouton a changé "
+            "d'allure, je le réapprends tout seul.")
+        REPARER_APRES = 5.0
     faites = echecs = 0
+    retour_essaye = False
     while not max_attaques or faites < max_attaques:
         try:
             if nuit:
@@ -2933,6 +3246,10 @@ def boucle(tel, max_attaques, debug, nuit=False, duree=None):
                 une_attaque(tel, faites + 1, debug, duree)
             faites += 1
             echecs = 0
+            retour_essaye = False
+            if version and version != verifiee:
+                verifiee = version
+                noter_reparations(jeu=version)
         except Bloque as e:
             echecs += 1
             chemin = sauver(e.ecran.img, "bloque") if e.ecran is not None else None
@@ -2942,13 +3259,33 @@ def boucle(tel, max_attaques, debug, nuit=False, duree=None):
                 break
             if isinstance(tel, Telephone) and not tel.liaison():
                 continue
+            if isinstance(tel, Telephone) and tel.jeu_devant():
+                chemin = ecran_inconnu(tel)
+                if chemin and not retour_essaye:
+                    # une fenêtre que le bot ne connaît pas (nouveautés, offre…) : Retour la ferme ;
+                    # au village il ouvre « Quitter ? », que le deuxième Retour referme
+                    retour_essaye = True
+                    for _ in range(2):
+                        log("  écran inconnu : j'essaie la touche Retour")
+                        tel.shell("input keyevent KEYCODE_BACK")
+                        time.sleep(2)
+                        chemin = ecran_inconnu(tel)
+                        if not chemin:
+                            break
+                if chemin:
+                    log(f"Écran inconnu : aucun bouton du bot n'est à l'écran (capture : {chemin}), et "
+                        "ni la touche Retour ni le réapprentissage des boutons n'ont suffi. Si le jeu "
+                        "vient d'être mis à jour, refais l'image du bouton qui a changé avec "
+                        "« bot_coc.py capture NOM ». J'arrête sans relancer le jeu.")
+                    break
             if echecs >= 2 and isinstance(tel, Telephone):
                 log("  2 blocages de suite : je relance le jeu")   # connexion perdue, inactivité…
                 if not tel.relancer_jeu():
                     log("  le jeu ne s'affiche pas (écran verrouillé ?)")
                 continue
             recuperer(tel, nuit)
-    log(f"Fin : {faites} attaque(s) terminée(s).")
+    log(f"Fin : {faites} attaque(s) terminée(s)."
+        + (f" Boutons réappris tout seul : {', '.join(reappris)}." if reappris else ""))
 
 
 # ─── Base des ouvriers (--nuit) : la barre ───────────────────────────────────
@@ -3598,6 +3935,7 @@ def attendre_combat_nuit(tel, delai=120):
     ecran = None
     noms = [*popups(), "nuit/trouver", "nuit/trouver_partie", "trouver_partie", "nuit/attaquer", "nuit/combat"]
     vus = {}
+    rien_depuis = time.monotonic()
     while time.monotonic() < fin:
         ecran = tel.capture()
         barre = lire_barre_nuit(ecran)
@@ -3617,6 +3955,11 @@ def attendre_combat_nuit(tel, delai=120):
                     derniere["nuit/combat"] = time.monotonic() + 10
             break
         vus = nouveaux
+        if nouveaux:
+            rien_depuis = time.monotonic() + 30   # la recherche d'adversaire n'affiche aucun bouton connu
+        elif time.monotonic() - rien_depuis >= REPARER_APRES:
+            reparer(tel, ["nuit/combat", "nuit/trouver"])
+            rien_depuis = time.monotonic() + 20
         time.sleep(0.3)
     raise Bloque("le combat n'a pas commencé : s'il faut toucher un autre bouton après « Combat », "
                  "crée-le avec « python bot_coc.py capture nuit/trouver »", ecran)
@@ -3971,6 +4314,7 @@ def main():
                 mode_vues(tel, a.vue if a.image else None)
         else:
             tel.resolution_du_bot()
+            tel.couper_son()
             nuit = a.nuit
             if a.auto:
                 nuit = detecter_village(tel)
