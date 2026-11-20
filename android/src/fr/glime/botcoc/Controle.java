@@ -94,6 +94,7 @@ final class Controle {
         if (essai != null) {
             if (essai.containsKey("attaques")) Config.attaques = essai.getInt("attaques");
             if (essai.containsKey("duree")) Config.duree = essai.getInt("duree");
+            if (essai.containsKey("fige")) Config.capitulerSiFige = essai.getInt("fige");
             if (essai.containsKey("debug")) Config.debug = essai.getBoolean("debug");
             if (essai.containsKey("village")) Config.village = essai.getString("village");
         }

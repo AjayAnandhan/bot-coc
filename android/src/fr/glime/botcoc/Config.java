@@ -36,8 +36,9 @@ final class Config {
 
     static final String[] OBLIGATOIRES = {"combat", "trouver_partie", "terminer_bataille", "suivant", "rentrer_village"};
 
-    static final double VITESSE_APRES = 100.0;
-    static final double VITESSE_PERIODE = 3.0;
+    static final double VITESSE_APRES = 30.0;
+    static final double VITESSE_MANQUE = 130.0;
+    static final double VITESSE_PERIODE = 0.5;
     static final double CAPITULER_APRES_MIN = 20.0;
     static final int SEUIL_ETOILE = 46;
     static final double BONUS_ETOILE = 15.0;

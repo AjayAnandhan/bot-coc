@@ -216,7 +216,8 @@ FACULTATIFS = ("attaquer",)
 # Bouton de vitesse du combat (« 1x » / « 4x », à droite) : il apparaît au bout de 2 minutes,
 # dans les deux villages. Le bot le touche quand il affiche 1x (le combat passe en ×4), jamais
 # quand il affiche 4x (ce serait revenir en ×1).
-VITESSE_APRES = 100.0        # s de combat avant de commencer à le guetter
+VITESSE_APRES = 30.0         # s de combat avant de commencer à le guetter (après la pose)
+VITESSE_MANQUE = 130.0       # s de combat : toujours pas là, on le note (avec une capture)
 
 # Capitulation quand plus rien n'avance : si les « Dégâts généraux » n'ont pas bougé depuis
 # CAPITULER_SI_FIGE s (et pas avant CAPITULER_APRES_MIN s après le début de la pose), le bot
@@ -227,7 +228,7 @@ CAPITULER_APRES_MIN = 20.0
 # (délai sans destruction doublé, durée max + BONUS_ETOILE s) tant que l'étoile n'est pas là.
 SEUIL_ETOILE = 46
 BONUS_ETOILE = 15.0
-VITESSE_PERIODE = 3.0        # s entre deux coups d'œil tant qu'il n'est pas sur 4x
+VITESSE_PERIODE = 0.5        # s entre deux coups d'œil tant qu'il n'est pas sur 4x : touché dès qu'il apparaît
 
 # Base des ouvriers (--nuit)
 COMPETENCE_TROUPES_APRES = 5.0   # compétence de chaque camp 5 s après sa pose…
@@ -2769,15 +2770,18 @@ def lire_vitesse(ecran):
 
 
 class Vitesse:
-    """Guette le bouton de vitesse pendant un combat (un coup d'œil toutes les 3 s à partir
-    de 100 s de combat ; toutes les 15 s une fois sur 4x) et le touche quand il affiche 1x.
-    Après une touche, on regarde vite s'il est bien passé sur 4x."""
+    """Guette le bouton de vitesse pendant un combat. Il apparaît quand il reste 1 min (2 min
+    après la première pose) : un coup d'œil toutes les 0,5 s à partir de 30 s de combat, toutes
+    les 15 s une fois sur 4x. Il est touché quand il affiche 1x, puis relu : resté sur 1x, il
+    est retouché une seule fois, et c'est noté dans le journal. Absent à VITESSE_MANQUE s, une
+    ligne et une capture (le jeu l'a peut-être redessiné)."""
 
     def __init__(self, tel):
         self.tel = tel
         self.prochain = 0.0
-        self.touche = 0.0
+        self.touches = 0
         self.etat = None
+        self.signale = False
 
     def guetter(self, debut):
         t = time.monotonic()
@@ -2786,12 +2790,26 @@ class Vitesse:
         lignes = lignes_de("vitesse_1x", 20) or lignes_de("vitesse_4x", 20)
         ecran = self.tel.capture_bande(*lignes) if lignes else self.tel.capture()
         etat, point = lire_vitesse(ecran)
-        if etat == "1x" and time.monotonic() - self.touche > 2.0:
+        if etat is None and lignes and not self.signale and t - debut >= VITESSE_MANQUE:
+            ecran = self.tel.capture()
+            etat, point = lire_vitesse(ecran)
+        if etat == "4x" and self.touches and self.etat != "4x":
+            log("  vitesse ×4 vérifiée" + (" (2e touche)" if self.touches == 2 else ""))
+        if etat == "1x" and self.touches < 2:
+            if self.touches:
+                log("  le bouton de vitesse est resté sur 1x : je le retouche une fois")
+            else:
+                log("  → vitesse ×4")
             self.tel.toucher(point)
-            self.touche = time.monotonic()
-            log("  → vitesse ×4")
-            self.prochain = time.monotonic() + 1.5
+            self.touches += 1
+            self.prochain = time.monotonic() + 2.5         # le temps que le chiffre change
         else:
+            if not self.signale and etat == "1x":
+                self.signale = True
+                log("  vitesse : toujours 1x après 2 touches, je n'insiste plus")
+            elif not self.signale and etat is None and not self.touches and t - debut >= VITESSE_MANQUE:
+                self.signale = True
+                log(f"  bouton de vitesse introuvable à 1 min de la fin : {sauver(ecran.img, 'vitesse_absente')}")
             self.prochain = time.monotonic() + (15.0 if etat == "4x" else VITESSE_PERIODE)
         self.etat = etat
         return etat

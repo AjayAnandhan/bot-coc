@@ -710,9 +710,13 @@ final class Combat {
         return s1 > s4 ? new Object[]{"1x", t1} : new Object[]{"4x", t4};
     }
 
+    /** Bouton de vitesse : il apparaît quand il reste 1 min. Touché sur 1x, puis relu : resté sur 1x,
+     *  il est retouché une seule fois, et c'est noté. Absent à VITESSE_MANQUE s : une ligne et une capture. */
     static final class Vitesse {
         final Tel tel;
-        double prochain = 0, touche = 0;
+        double prochain = 0;
+        int touches = 0;
+        boolean signale = false;
         String etat;
 
         Vitesse(Tel tel) { this.tel = tel; }
@@ -720,14 +724,24 @@ final class Combat {
         String guetter(double debut) {
             double t = Tel.maintenant();
             if (debut == 0 || t - debut < Config.VITESSE_APRES || t < prochain) return etat;
-            Object[] lu = lireVitesse(tel.capture());
+            Ecran ecran = tel.capture();
+            Object[] lu = lireVitesse(ecran);
             String e = lu == null ? null : (String) lu[0];
-            if ("1x".equals(e) && Tel.maintenant() - touche > 2.0) {
+            if ("4x".equals(e) && touches > 0 && !"4x".equals(etat))
+                log("  vitesse ×4 vérifiée" + (touches == 2 ? " (2e touche)" : ""));
+            if ("1x".equals(e) && touches < 2) {
+                log(touches > 0 ? "  le bouton de vitesse est resté sur 1x : je le retouche une fois" : "  → vitesse ×4");
                 tel.toucher(((Trouve) lu[1]).point());
-                touche = Tel.maintenant();
-                log("  → vitesse ×4");
-                prochain = Tel.maintenant() + 1.5;
+                touches++;
+                prochain = Tel.maintenant() + 2.5;
             } else {
+                if (!signale && "1x".equals(e)) {
+                    signale = true;
+                    log("  vitesse : toujours 1x après 2 touches, je n'insiste plus");
+                } else if (!signale && e == null && touches == 0 && t - debut >= Config.VITESSE_MANQUE) {
+                    signale = true;
+                    log("  bouton de vitesse introuvable à 1 min de la fin : " + sauver(ecran.img(), "vitesse_absente"));
+                }
                 prochain = Tel.maintenant() + ("4x".equals(e) ? 15.0 : Config.VITESSE_PERIODE);
             }
             etat = e;
